@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title id="toy_name">WebToy</title>
+    <link rel="stylesheet" href="/static/bootstrap/css/bootstrap.min.css">
+</head>
+<body>
+<div class="container">
+    <div class="col-md-6 col-md-offset-3">
+        <div style="margin-top: 30px">
+            <button class="col-md-2 btn btn-default">DeviceKey:</button>
+            <span class="col-md-8"><input type="text" id="device_key" class="form-control"></span>
+            <span class="col-md-2 "><button onclick="toy_open()" class="btn btn-primary"
+                                            style="padding: 8px 14px">开机</button></span>
+        </div>
+
+        <div style="margin-top: 10px">
+            <button class="btn btn-default">from who -> <span id="from_user"></span></button>
+        </div>
+        <div style="margin-top: 10px">
+            <audio controls autoplay id="player"></audio>
+        </div>
+        <button class="btn btn-primary " onclick="reco_start()">录制声音</button>
+        <button class="btn btn-success " onclick="reco_stop()">发送声音</button>
+        <button class="btn btn-primary " onclick="recv_msg()">播放消息</button>
+        <button class="btn btn-success btn-block " style="margin-top: 10px" onclick="reco_ai()">发送语音指令</button>
+
+    </div>
+</div>
+</body>
+<script type="application/javascript" src="/static/js/jquery-3.3.1.min.js"></script>
+<script type="application/javascript" src="/static/Recorder.js"></script>
+<script type="application/javascript">
+    var ws = null;
+    var toy_id = null;
+    var serv = 'http://192.168.1.109:9527/';
+    var music_serv = 'http://192.168.1.109:9527/getmusic/';
+    var chat_serv = 'http://192.168.1.109:9527/getchat/';
+    var ws_serv = 'ws://192.168.1.109:8080/';
+    function create_ws(toy_id) {
+        ws = new WebSocket(ws_serv +  'toy/' + toy_id);
+        ws.onmessage = function (eventMessage) {
+            var msg = JSON.parse(eventMessage.data);
+            {#console.log(msg);#}
+            if (msg.music) {
+                document.getElementById('player').src = music_serv + msg.music;
+            } else {
+                document.getElementById('from_user').innerText = msg.from_user;
+                document.getElementById('player').src = chat_serv + msg.chat;
+            }
+        };
+        // 递归重开websocket,防止网络风暴出现的问题
+        ws.onclose = function () {
+            create_ws(toy_id);
+        }
+    }
+
+    function toy_open() {
+        var device_key = document.getElementById('device_key').value;
+        $.post(serv + 'toy/open',
+            {device_key: device_key},
+            function (data) {
+                if (data.toy_id) {
+                    toy_id = data.toy_id;
+                    document.getElementById('toy_name').innerText = data.toy_name;
+                    create_ws(data.toy_id);
+                }
+                document.getElementById('player').src = music_serv + data.music
+            }, 'json')
+    }
+
+    function recv_msg() {
+        $.post( serv + 'recv/msg', {
+            to_user: toy_id,
+            from_user: document.getElementById('from_user').innerText
+        }, function (data) {
+            console.log(data);
+
+            // pop方法有返回值,删的哪个就返回哪一个
+            var last_data = data.pop();
+            document.getElementById('player').src = chat_serv + last_data.chat;
+            document.getElementById('from_user').innerText = last_data.from_user;
+            document.getElementById('player').onended = function () {  //播放一条语音后执行下面函数
+                if (data.length === 0) {
+                    return
+                }
+                document.getElementById('player').src = chat_serv + data.pop().chat;
+            }
+        }, 'json')
+    }
+
+    // 录音功能
+    var reco = null;  //reco就是recorder的缩写
+    var audio_context = new AudioContext();  //获取音频内容对象,AudioContext不仅能打开扬声器,而且能打开麦克风,包含整个网页输入的声音
+    navigator.getUserMedia = (navigator.getUserMedia ||    //麦克风输入的内容放到getUserMedia中
+        navigator.webkitGetUserMedia ||
+        navigator.mozGetUserMedia ||  //火狐浏览器用
+        navigator.msGetUserMedia);   //微软浏览器用
+    // 实例化
+    navigator.getUserMedia({audio: true}, create_stream, function (err) {
+        console.log(err)
+    });  // 第一个参数含义:要开启所有音频对象,成功了执行create_stream(在下面),失败执行err函数,
+    // 在js中像create_stream这个下面有对应函数的,是非匿名函数,写的时候不用传参.
+
+    function create_stream(user_media) { // audio 麦克风和扬声器
+        var stream_input = audio_context.createMediaStreamSource(user_media); //媒体流容器,就是录的音频放的地方
+        reco = new Recorder(stream_input);
+    }
+
+
+    function reco_start() {
+        reco.record();   //开始录音了
+    }
+
+    function reco_stop() {
+        reco.stop();  //停止录音
+        reco.exportWAV(function (wav_file) {   //音频格式是WAV格式
+            console.log(wav_file); // Blob 对象,(前端的文件对象)
+            var formdata = new FormData(); // form 表单 存的是input标签,{key:value}格式传数据
+            formdata.append('reco', wav_file); // form -> input type="file" name="reco"
+            formdata.append("from_user", toy_id);
+            formdata.append("to_user", document.getElementById('from_user').innerText);
+            // form input type="text / password 编辑框" name="username" value = "attila"
+            $.ajax({
+                url: serv + "upload/toy",    //访问拼接地址
+                type: 'post',
+                processData: false,  //不处理数据
+                contentType: false,  // 文件头里不带任何contentType的东西
+                data: formdata,
+                dataType: 'json',   // 返回的数据格式
+                success: function (data) {
+                    console.log(data);
+                    ws.send(JSON.stringify(data));  // {'to_user': to_user, 'from_user': from_user, 'chat': filename}
+                    document.getElementById("player").src = music_serv + 'send.mp3';
+                }
+            })
+        });
+
+        reco.clear();  //清空容器,不然会由于原来的音频在里面出现错误
+    }
+
+    function reco_ai() {
+        reco.stop();  //停止录音
+        reco.exportWAV(function (wav_file) {   //音频格式是WAV格式
+            console.log(wav_file); // Blob 对象,(前端的文件对象)
+            var formdata = new FormData(); // form 表单 存的是input标签,{key:value}格式传数据
+            formdata.append('reco', wav_file); // form -> input type="file" name="reco"
+            formdata.append('toy_id', toy_id);
+            $.ajax({
+                url: serv + "upload/ai",    //访问拼接地址
+                type: 'post',
+                processData: false,  //不处理数据
+                contentType: false,  // 文件头里不带任何contentType的东西
+                data: formdata,
+                dataType: 'json',   // 返回的数据格式
+                success: function (data) {
+                    console.log(data);  // {'from_user': friend.get('friend_id'), 'chat': filename}
+                    document.getElementById('from_user').innerText = data.from_user;
+                    if (data.music) {
+                        document.getElementById('player').src = music_serv + data.music;
+                    } else {
+                        document.getElementById('player').src = chat_serv + data.chat;
+                    }
+
+                }
+            })
+        });
+
+        reco.clear();  //清空容器,不然会由于原来的音频在里面出现错误
+    }
+
+
+</script>
+</html>
